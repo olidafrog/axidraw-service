@@ -93,6 +93,27 @@ Environment variables (set in `docker-compose.yml`):
 | `DATA_DIR` | `/data` | Directory for job database and uploads |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `AXIDRAW_DEVICE` | `/dev/ttyACM0` | USB device path for AxiDraw |
+| `API_KEY` | (none) | API key for authentication. If set, all requests must include `X-API-Key` header |
+
+### Authentication
+
+For security, you can enable API key authentication by setting the `API_KEY` environment variable:
+
+```yaml
+# docker-compose.yml
+environment:
+  - API_KEY=your-secret-key-here
+```
+
+When enabled, all API requests must include the `X-API-Key` header:
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H "X-API-Key: your-secret-key-here" \
+  -F "file=@drawing.svg"
+```
+
+**Recommended**: Always set an API key when exposing the service to a network, even on Tailscale.
 
 ## Job Parameters
 
