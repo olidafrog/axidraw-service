@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  axidraw-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: axidraw-service
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0  # Adjust based on actual device
+      # Alternative: /dev/ttyUSB0:/dev/ttyUSB0
+    environment:
+      - DATA_DIR=/data
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    # Note: Avoid privileged mode if possible
+    # privileged: true
