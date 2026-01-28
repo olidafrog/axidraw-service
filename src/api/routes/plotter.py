@@ -1,10 +1,11 @@
 """Plotter control endpoints"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from src.api.models import PlotterStatus, PlotterState
+from src.api.dependencies import verify_api_key
 from src.plotter.controller import plotter
 
-router = APIRouter(prefix="/plotter", tags=["plotter"])
+router = APIRouter(prefix="/plotter", tags=["plotter"], dependencies=[Depends(verify_api_key)])
 
 
 @router.get("/status", response_model=PlotterStatus)
@@ -48,6 +49,6 @@ async def cancel_current_job():
     
     success = await plotter.cancel()
     if not success:
-        raise HTTPException(status_code=501, detail="Cancel not implemented yet")
+        raise HTTPException(status_code=500, detail="Failed to cancel job")
     
     return {"message": "Job cancelled"}

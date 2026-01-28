@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # API
     api_prefix: str = "/api"
     cors_origins: list[str] = ["*"]
+    api_key: str | None = None  # Set via API_KEY env var for authentication
     
     class Config:
         env_file = ".env"

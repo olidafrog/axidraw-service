@@ -1,6 +1,8 @@
 """Job management endpoints"""
 import aiofiles
 import logging
+import re
+import uuid
 from pathlib import Path
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
@@ -9,12 +11,42 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.models import (
     JobResponse, JobSubmitResponse, JobStatus, JobParameters, ErrorResponse
 )
+from src.api.dependencies import verify_api_key
 from src.config import settings
 from src.queue.database import get_session, JobStatus as DBJobStatus
 from src.queue.manager import queue_manager
 
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)])
 logger = logging.getLogger(__name__)
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename to prevent path traversal attacks.
+    
+    - Removes path separators and null bytes
+    - Keeps only safe characters (alphanumeric, dash, underscore, dot, space)
+    - Ensures filename is not empty or hidden
+    - Falls back to UUID-based name if invalid
+    """
+    # Remove path separators and null bytes
+    filename = filename.replace('/', '_').replace('\\', '_').replace('\0', '')
+    
+    # Keep only safe characters
+    filename = re.sub(r'[^\w\-_\. ]', '_', filename)
+    
+    # Get just the filename part (no directory)
+    filename = Path(filename).name
+    
+    # Ensure it's not empty or hidden file
+    if not filename or filename.startswith('.') or filename == '':
+        filename = f"upload_{uuid.uuid4().hex[:8]}.svg"
+    
+    # Ensure it has .svg extension
+    if not filename.lower().endswith('.svg'):
+        filename = f"{filename}.svg"
+    
+    return filename
 
 
 @router.post("", response_model=JobSubmitResponse)
@@ -55,16 +87,34 @@ async def submit_job(
             detail=f"Queue is full (max {settings.max_queue_size} jobs)"
         )
     
-    # Save file
-    filename = file.filename
+    # Sanitize and save file
+    filename = sanitize_filename(file.filename)
     filepath = settings.uploads_dir / filename
+    
+    # Verify resolved path is within uploads directory (prevent path traversal)
+    try:
+        resolved_path = filepath.resolve()
+        uploads_resolved = settings.uploads_dir.resolve()
+        if not resolved_path.is_relative_to(uploads_resolved):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid filename: path traversal detected"
+            )
+    except (ValueError, OSError) as e:
+        logger.error(f"Path validation error: {e}")
+        raise HTTPException(status_code=400, detail="Invalid filename")
     
     # Handle duplicate filenames
     counter = 1
     while filepath.exists():
         name_part = Path(filename).stem
         ext_part = Path(filename).suffix
-        filepath = settings.uploads_dir / f"{name_part}_{counter}{ext_part}"
+        new_filename = f"{name_part}_{counter}{ext_part}"
+        filepath = settings.uploads_dir / new_filename
+        
+        # Re-validate new path
+        if not filepath.resolve().is_relative_to(uploads_resolved):
+            raise HTTPException(status_code=400, detail="Invalid filename")
         counter += 1
     
     async with aiofiles.open(filepath, 'wb') as f:
@@ -189,9 +239,12 @@ async def cancel_job(
             detail=f"Cannot cancel job in {job.status} state"
         )
     
-    # If running, we'd need to stop the plotter (not implemented yet)
+    # If running, stop the plotter
     if job.status == DBJobStatus.RUNNING.value:
-        raise HTTPException(status_code=501, detail="Cancelling running jobs not yet implemented")
+        from src.plotter.controller import plotter
+        cancel_success = await plotter.cancel()
+        if not cancel_success:
+            raise HTTPException(status_code=500, detail="Failed to cancel running job")
     
     # Mark as cancelled
     await queue_manager.update_job_status(session, job_id, DBJobStatus.CANCELLED)

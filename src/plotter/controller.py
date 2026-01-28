@@ -1,4 +1,5 @@
 """AxiDraw plotter controller - wraps AxiCLI"""
+import asyncio
 import logging
 import subprocess
 import time
@@ -36,6 +37,7 @@ class AxiDrawController:
         self._start_time = time.time()
         self._jobs_completed = 0
         self._info: Optional[PlotterInfo] = None
+        self._current_process: Optional[asyncio.subprocess.Process] = None
         
     def get_uptime(self) -> int:
         """Get service uptime in seconds"""
@@ -124,37 +126,42 @@ class AxiDrawController:
             
             logger.info(f"Starting plot job {job_id}: {' '.join(cmd)}")
             
-            # Execute plotting command
-            # Note: This is a blocking operation. For production, consider using
-            # asyncio subprocess or threading for better async handling
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+            # Execute plotting command using async subprocess
+            self._current_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
             
-            # Monitor process output for progress
-            # AxiCLI doesn't provide detailed progress, so we'll simulate
-            # In production, you might parse output or use time-based estimation
-            stdout, stderr = process.communicate(timeout=parameters.get("timeout", 3600))
-            
-            if process.returncode == 0:
-                logger.info(f"Job {job_id} completed successfully")
-                self._jobs_completed += 1
-                if progress_callback:
-                    await progress_callback(100)
-                return True
-            else:
-                logger.error(f"Job {job_id} failed: {stderr}")
+            # Monitor process output for progress with timeout
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    self._current_process.communicate(),
+                    timeout=parameters.get("timeout", 3600)
+                )
+                
+                # Decode output
+                stdout_text = stdout.decode() if stdout else ""
+                stderr_text = stderr.decode() if stderr else ""
+                
+                if self._current_process.returncode == 0:
+                    logger.info(f"Job {job_id} completed successfully")
+                    self._jobs_completed += 1
+                    if progress_callback:
+                        await progress_callback(100)
+                    return True
+                else:
+                    logger.error(f"Job {job_id} failed: {stderr_text}")
+                    self.state = PlotterState.ERROR
+                    return False
+                    
+            except asyncio.TimeoutError:
+                logger.error(f"Job {job_id} timed out")
+                if self._current_process:
+                    self._current_process.kill()
+                    await self._current_process.wait()
                 self.state = PlotterState.ERROR
                 return False
-                
-        except subprocess.TimeoutExpired:
-            logger.error(f"Job {job_id} timed out")
-            process.kill()
-            self.state = PlotterState.ERROR
-            return False
             
         except Exception as e:
             logger.error(f"Error plotting job {job_id}: {e}")
@@ -164,6 +171,7 @@ class AxiDrawController:
         finally:
             self.state = PlotterState.IDLE
             self.current_job_id = None
+            self._current_process = None
     
     async def pause(self) -> bool:
         """Pause current plotting job"""
@@ -178,10 +186,42 @@ class AxiDrawController:
         return False
     
     async def cancel(self) -> bool:
-        """Cancel current plotting job"""
-        # Would need to track subprocess and kill it
-        logger.warning("Cancel not yet implemented")
-        return False
+        """
+        Cancel current plotting job
+        
+        Terminates the subprocess gracefully (SIGTERM), with fallback to kill (SIGKILL)
+        if process doesn't exit within 5 seconds.
+        """
+        if not self._current_process or self._current_process.returncode is not None:
+            logger.warning("No active process to cancel")
+            return False
+        
+        try:
+            logger.info(f"Cancelling job {self.current_job_id}")
+            
+            # Try graceful termination first
+            self._current_process.terminate()
+            
+            try:
+                # Wait up to 5 seconds for graceful shutdown
+                await asyncio.wait_for(self._current_process.wait(), timeout=5)
+                logger.info(f"Job {self.current_job_id} terminated gracefully")
+            except asyncio.TimeoutError:
+                # Force kill if still running
+                logger.warning(f"Job {self.current_job_id} didn't terminate, killing")
+                self._current_process.kill()
+                await self._current_process.wait()
+            
+            # Update state
+            self.state = PlotterState.IDLE
+            self.current_job_id = None
+            self._current_process = None
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error cancelling job: {e}")
+            return False
     
     def get_status(self) -> Dict[str, Any]:
         """Get current plotter status"""
