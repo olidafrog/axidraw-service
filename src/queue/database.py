@@ -1,13 +1,18 @@
 """Database models for job queue"""
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from sqlalchemy import Column, String, Integer, DateTime, Text, create_engine
+from sqlalchemy import Column, String, Integer, DateTime, Text, Index, create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
 from src.config import settings
 
 Base = declarative_base()
+
+
+def utc_now() -> datetime:
+    """Get current UTC time as timezone-aware datetime"""
+    return datetime.now(timezone.utc)
 
 
 class JobStatus(str, Enum):
@@ -27,13 +32,18 @@ class Job(Base):
     id = Column(String, primary_key=True)
     filename = Column(String, nullable=False)
     filepath = Column(String, nullable=False)
-    status = Column(String, nullable=False, default=JobStatus.QUEUED.value)
+    status = Column(String, nullable=False, default=JobStatus.QUEUED.value, index=True)
     progress = Column(Integer, default=0)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
     error = Column(Text, nullable=True)
     parameters = Column(Text, nullable=True)  # JSON string
+    
+    # Composite index for common query pattern (queued jobs ordered by creation time)
+    __table_args__ = (
+        Index('ix_jobs_status_created_at', 'status', 'created_at'),
+    )
 
 
 # Create async engine

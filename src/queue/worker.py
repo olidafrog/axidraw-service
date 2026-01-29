@@ -1,7 +1,9 @@
 """Background worker for processing job queue"""
 import asyncio
+import json
 import logging
 from pathlib import Path
+from typing import Optional
 
 from src.queue.manager import queue_manager
 from src.queue.database import AsyncSessionLocal, JobStatus
@@ -72,9 +74,19 @@ class JobWorker:
                 
                 logger.info(f"Processing job {next_job.id}: {next_job.filename}")
                 
-                # Parse parameters
-                import json
-                parameters = json.loads(next_job.parameters) if next_job.parameters else {}
+                # Parse parameters with validation
+                try:
+                    parameters = json.loads(next_job.parameters) if next_job.parameters else {}
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON parameters for job {next_job.id}: {e}")
+                    async with AsyncSessionLocal() as session:
+                        await queue_manager.update_job_status(
+                            session,
+                            next_job.id,
+                            JobStatus.FAILED,
+                            error=f"Invalid job parameters: {e}"
+                        )
+                    continue
                 
                 # Plot the SVG
                 svg_path = Path(next_job.filepath)
@@ -114,6 +126,14 @@ class JobWorker:
                             error="Plotting failed"
                         )
                         logger.error(f"Job {next_job.id} failed")
+                
+                # Cleanup uploaded SVG file after job completion
+                try:
+                    if svg_path.exists():
+                        svg_path.unlink()
+                        logger.info(f"Cleaned up file: {svg_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup file {svg_path}: {e}")
                 
             except asyncio.CancelledError:
                 logger.info("Worker loop cancelled")

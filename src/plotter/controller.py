@@ -1,7 +1,6 @@
 """AxiDraw plotter controller - wraps AxiCLI"""
 import asyncio
 import logging
-import subprocess
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -50,25 +49,36 @@ class AxiDrawController:
     async def check_connection(self) -> PlotterInfo:
         """Check if AxiDraw is connected"""
         try:
-            # Try to run axicli with version flag
-            result = subprocess.run(
-                ["python", "-m", "axicli", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5
+            # Try to run axicli with version flag using async subprocess
+            process = await asyncio.create_subprocess_exec(
+                "python", "-m", "axicli", "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
             
-            if result.returncode == 0:
-                version_info = result.stdout.strip()
-                self._info = PlotterInfo(
-                    connected=True,
-                    model="AxiDraw",  # Could parse from version output
-                    firmware=version_info
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=5
                 )
-                logger.info(f"AxiDraw connected: {version_info}")
-            else:
+                
+                if process.returncode == 0:
+                    version_info = stdout.decode().strip()
+                    self._info = PlotterInfo(
+                        connected=True,
+                        model="AxiDraw",  # Could parse from version output
+                        firmware=version_info
+                    )
+                    logger.info(f"AxiDraw connected: {version_info}")
+                else:
+                    self._info = PlotterInfo(connected=False)
+                    logger.warning("AxiDraw not detected")
+                    
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
                 self._info = PlotterInfo(connected=False)
-                logger.warning("AxiDraw not detected")
+                logger.warning("AxiDraw connection check timed out")
                 
         except Exception as e:
             logger.error(f"Error checking AxiDraw connection: {e}")

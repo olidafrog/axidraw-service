@@ -1,14 +1,21 @@
 """Main FastAPI application"""
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from src.config import settings
 from src.api.routes import health, jobs, plotter
 from src.queue.database import init_db
 from src.queue.worker import worker
 from src.plotter.controller import plotter as plotter_controller
+
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address, enabled=settings.rate_limit_enabled)
 
 # Configure logging
 logging.basicConfig(
@@ -53,6 +60,10 @@ app = FastAPI(
     description="REST API for controlling AxiDraw pen plotter",
     lifespan=lifespan
 )
+
+# Configure rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Configure CORS
 app.add_middleware(

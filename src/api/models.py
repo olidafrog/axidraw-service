@@ -25,12 +25,41 @@ class PlotterState(str, Enum):
 
 
 class JobParameters(BaseModel):
-    """Job plotting parameters"""
-    layers: Optional[str] = Field(None, description="Comma-separated layer IDs")
-    speed: int = Field(25, ge=1, le=100, description="Plotting speed (1-100)")
-    pen_up_delay: int = Field(150, ge=0, description="Pen up delay in milliseconds")
-    pen_down_delay: int = Field(150, ge=0, description="Pen down delay in milliseconds")
-    preview: bool = Field(False, description="Preview mode (no actual plotting)")
+    """Job plotting parameters with validation"""
+    layers: Optional[str] = Field(
+        None, 
+        description="Comma-separated layer IDs (e.g., '1,2,3')",
+        pattern=r'^[\d,\s]*$',  # Only digits, commas, spaces
+        max_length=100
+    )
+    speed: int = Field(
+        25, 
+        ge=1, 
+        le=100, 
+        description="Plotting speed (1-100)"
+    )
+    pen_up_delay: int = Field(
+        150, 
+        ge=0, 
+        le=5000,  # Max 5 seconds
+        description="Pen up delay in milliseconds (0-5000)"
+    )
+    pen_down_delay: int = Field(
+        150, 
+        ge=0, 
+        le=5000,  # Max 5 seconds
+        description="Pen down delay in milliseconds (0-5000)"
+    )
+    preview: bool = Field(
+        False, 
+        description="Preview mode (no actual plotting)"
+    )
+    timeout: int = Field(
+        3600,
+        ge=60,
+        le=86400,  # Max 24 hours
+        description="Job timeout in seconds (60-86400)"
+    )
 
 
 class JobCreate(BaseModel):

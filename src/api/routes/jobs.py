@@ -5,8 +5,10 @@ import re
 import uuid
 from pathlib import Path
 from typing import List
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from src.api.models import (
     JobResponse, JobSubmitResponse, JobStatus, JobParameters, ErrorResponse
@@ -18,6 +20,9 @@ from src.queue.manager import queue_manager
 
 router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)])
 logger = logging.getLogger(__name__)
+
+# Rate limiter instance (will use app.state.limiter)
+limiter = Limiter(key_func=get_remote_address)
 
 
 def sanitize_filename(filename: str) -> str:
@@ -50,7 +55,9 @@ def sanitize_filename(filename: str) -> str:
 
 
 @router.post("", response_model=JobSubmitResponse)
+@limiter.limit(f"{settings.rate_limit_requests}/{settings.rate_limit_window}")
 async def submit_job(
+    request: Request,
     file: UploadFile = File(..., description="SVG file to plot"),
     layers: str = Form(None, description="Comma-separated layer IDs"),
     speed: int = Form(25, ge=1, le=100, description="Plotting speed"),
@@ -87,14 +94,14 @@ async def submit_job(
             detail=f"Queue is full (max {settings.max_queue_size} jobs)"
         )
     
-    # Sanitize and save file
+    # Sanitize filename BEFORE any file operations (prevent path traversal)
     filename = sanitize_filename(file.filename)
+    uploads_resolved = settings.uploads_dir.resolve()
     filepath = settings.uploads_dir / filename
     
-    # Verify resolved path is within uploads directory (prevent path traversal)
+    # Verify resolved path is within uploads directory BEFORE writing
     try:
         resolved_path = filepath.resolve()
-        uploads_resolved = settings.uploads_dir.resolve()
         if not resolved_path.is_relative_to(uploads_resolved):
             raise HTTPException(
                 status_code=400,
@@ -104,7 +111,7 @@ async def submit_job(
         logger.error(f"Path validation error: {e}")
         raise HTTPException(status_code=400, detail="Invalid filename")
     
-    # Handle duplicate filenames
+    # Handle duplicate filenames (validate each new path)
     counter = 1
     while filepath.exists():
         name_part = Path(filename).stem
@@ -112,11 +119,12 @@ async def submit_job(
         new_filename = f"{name_part}_{counter}{ext_part}"
         filepath = settings.uploads_dir / new_filename
         
-        # Re-validate new path
+        # Re-validate new path BEFORE any file write
         if not filepath.resolve().is_relative_to(uploads_resolved):
             raise HTTPException(status_code=400, detail="Invalid filename")
         counter += 1
     
+    # Now safe to write the file
     async with aiofiles.open(filepath, 'wb') as f:
         await f.write(content)
     

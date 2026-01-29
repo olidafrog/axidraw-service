@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]
     api_key: str | None = None  # Set via API_KEY env var for authentication
     
+    # Rate limiting
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = 100  # requests per window
+    rate_limit_window: str = "minute"  # minute, hour, day
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

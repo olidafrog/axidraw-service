@@ -2,13 +2,12 @@
 import json
 import logging
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.queue.database import Job, JobStatus, get_session
+from src.queue.database import Job, JobStatus, get_session, utc_now
 from src.api.models import JobParameters, JobResponse
 
 logger = logging.getLogger(__name__)
@@ -30,7 +29,7 @@ class JobQueueManager:
             filename=filename,
             filepath=str(filepath),
             status=JobStatus.QUEUED.value,
-            created_at=datetime.utcnow(),
+            created_at=utc_now(),
             parameters=json.dumps(parameters.model_dump())
         )
         
@@ -110,9 +109,9 @@ class JobQueueManager:
         
         # Update timestamps
         if status == JobStatus.RUNNING and not job.started_at:
-            job.started_at = datetime.utcnow()
+            job.started_at = utc_now()
         elif status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
-            job.completed_at = datetime.utcnow()
+            job.completed_at = utc_now()
         
         await session.commit()
         await session.refresh(job)
