@@ -2,18 +2,39 @@ name: Deploy to Pi
 
 on:
   push:
-    branches: [main]
+    branches: [master]  # Fixed: repo uses 'master', not 'main'
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild (ignore cache)'
+        required: false
+        default: 'false'
+        type: boolean
 
 env:
   PI_HOST: 100.103.87.83
   PI_USER: admin
   PROJECT_NAME: axidraw-service
+  HEALTH_CHECK_URL: http://localhost:8080/api/health
+  DEPLOY_TIMEOUT: 120  # seconds to wait for service to come up
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Dockerfile
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "::error::Dockerfile not found"
+            exit 1
+          fi
+          echo "✓ Dockerfile exists"
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -21,13 +42,115 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
+      - name: Wait for Tailscale connection
+        run: |
+          echo "Waiting for Tailscale to establish connection..."
+          for i in {1..30}; do
+            if tailscale status | grep -q "${{ env.PI_HOST }}"; then
+              echo "✓ Tailscale connected to Pi"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Failed to connect to Pi via Tailscale"
+          exit 1
+
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.PI_SSH_KEY }}
 
-      - name: Deploy ${{ env.PROJECT_NAME }}
+      - name: Test SSH connection
         run: |
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=10 \
+            ${{ env.PI_USER }}@${{ env.PI_HOST }} \
+            "echo '✓ SSH connection successful'"
+
+      - name: Get current deployment info
+        id: pre_deploy
+        run: |
+          # Capture current state for potential rollback
+          CURRENT_COMMIT=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ env.PI_USER }}@${{ env.PI_HOST }} \
+            "cd /home/admin/projects/${{ env.PROJECT_NAME }} && git rev-parse HEAD 2>/dev/null || echo 'none'")
+          echo "current_commit=$CURRENT_COMMIT" >> $GITHUB_OUTPUT
+          echo "Current deployment: $CURRENT_COMMIT"
+
+      - name: Deploy ${{ env.PROJECT_NAME }}
+        id: deploy
+        run: |
+          echo "Deploying ${{ env.PROJECT_NAME }}..."
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             ${{ env.PI_USER }}@${{ env.PI_HOST }} \
             "/opt/scripts/update-projects.sh ${{ env.PROJECT_NAME }}"
+          echo "✓ Deployment command completed"
+
+      - name: Wait for service to start
+        run: |
+          echo "Waiting for service to start..."
+          sleep 10
+
+      - name: Verify deployment - Health check
+        id: health_check
+        run: |
+          echo "Checking service health..."
+          for i in {1..12}; do
+            HEALTH=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              ${{ env.PI_USER }}@${{ env.PI_HOST }} \
+              "curl -sf ${{ env.HEALTH_CHECK_URL }} 2>/dev/null || echo 'FAILED'")
+            
+            if echo "$HEALTH" | grep -q '"status":"healthy"'; then
+              echo "✓ Health check passed!"
+              echo "$HEALTH" | jq . 2>/dev/null || echo "$HEALTH"
+              exit 0
+            fi
+            
+            echo "Attempt $i/12: Service not ready yet..."
+            sleep 10
+          done
+          
+          echo "::error::Health check failed after ${{ env.DEPLOY_TIMEOUT }}s"
+          exit 1
+
+      - name: Verify container status
+        run: |
+          echo "Container status:"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ env.PI_USER }}@${{ env.PI_HOST }} \
+            "docker ps --filter name=${{ env.PROJECT_NAME }} --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+
+      - name: Get deployment info
+        if: success()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ env.PROJECT_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** ${{ env.PI_USER }}@${{ env.PI_HOST }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Deployment successful!" >> $GITHUB_STEP_SUMMARY
+
+      - name: Rollback on failure
+        if: failure() && steps.pre_deploy.outputs.current_commit != 'none'
+        run: |
+          echo "::warning::Deployment failed! Attempting rollback to ${{ steps.pre_deploy.outputs.current_commit }}"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ env.PI_USER }}@${{ env.PI_HOST }} \
+            "cd /home/admin/projects/${{ env.PROJECT_NAME }} && \
+             git fetch && \
+             git checkout ${{ steps.pre_deploy.outputs.current_commit }} && \
+             cd /opt/docker && \
+             docker compose up -d --build ${{ env.PROJECT_NAME }}"
+          echo "Rollback attempted. Check service status manually."
+
+      - name: Collect failure logs
+        if: failure()
+        run: |
+          echo "## Failure Diagnostics" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ env.PI_USER }}@${{ env.PI_HOST }} \
+            "docker logs --tail 50 ${{ env.PROJECT_NAME }} 2>&1 || echo 'Could not retrieve logs'" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

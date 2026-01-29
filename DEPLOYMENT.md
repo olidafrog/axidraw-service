@@ -95,19 +95,21 @@ git commit -m "Initial commit: AxiDraw service"
 
 # Create repo on GitHub: olidafrog/axidraw-service
 git remote add origin https://github.com/olidafrog/axidraw-service.git
-git branch -M main
-git push -u origin main
+git branch -M master  # Note: This repo uses 'master' branch
+git push -u origin master
 ```
 
 ### 2. Add Secrets
 
 Add these secrets to the GitHub repository (Settings → Secrets and variables → Actions):
 
-- `TS_OAUTH_CLIENT_ID` - Tailscale OAuth client ID
-- `TS_OAUTH_SECRET` - Tailscale OAuth secret
-- `PI_SSH_KEY` - SSH private key for Pi access
+| Secret | Description | Notes |
+|--------|-------------|-------|
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID | Shared across services |
+| `TS_OAUTH_SECRET` | Tailscale OAuth secret | Shared across services |
+| `PI_SSH_KEY` | SSH private key for Pi access | Shared across services |
 
-(These should already exist from other services)
+These should already exist from other services (kindle-sync-server, invoice-generator, etc.).
 
 ### 3. Test Auto-Deploy
 
@@ -116,7 +118,7 @@ Add these secrets to the GitHub repository (Settings → Secrets and variables �
 echo "# Test" >> README.md
 git add README.md
 git commit -m "Test auto-deploy"
-git push origin main
+git push origin master
 ```
 
 Watch GitHub Actions and check Pi:
@@ -124,6 +126,14 @@ Watch GitHub Actions and check Pi:
 ssh admin@100.103.87.83
 docker logs axidraw-service
 ```
+
+### 4. Manual Workflow Trigger
+
+You can also trigger deployment manually via GitHub Actions:
+1. Go to Actions tab in the repository
+2. Select "Deploy to Pi" workflow
+3. Click "Run workflow"
+4. Optionally enable "Force rebuild" if needed
 
 ## Updating the Service
 
@@ -136,7 +146,43 @@ ssh admin@100.103.87.83
 
 ### Automatic Update
 
-Push to `main` branch - GitHub Actions will deploy automatically.
+Push to `master` branch - GitHub Actions will deploy automatically.
+
+## CI/CD Pipeline Details
+
+### Workflow Features
+
+The deployment workflow (`.github/workflows/deploy.yml`) includes:
+
+1. **Branch trigger**: Deploys on push to `master` branch
+2. **Tailscale connection**: Establishes secure tunnel to Pi
+3. **SSH deployment**: Runs update-projects.sh on the Pi
+4. **Health verification**: Checks `/api/health` endpoint after deployment
+5. **Rollback on failure**: Automatically reverts to previous commit if deployment fails
+6. **Failure diagnostics**: Collects container logs on failure
+
+### Deployment Flow
+
+```
+GitHub Push → Tailscale Connect → SSH to Pi → update-projects.sh → Health Check → ✓
+                                                      ↓
+                                            [If fails: Rollback]
+```
+
+### What update-projects.sh Does
+
+1. Pulls latest code to `/home/admin/projects/axidraw-service`
+2. Runs `docker compose up -d --build axidraw-service` from `/opt/docker/`
+3. The docker-compose.yml in `/opt/docker/` defines the service configuration
+
+### Deployment Locations
+
+| Location | Purpose |
+|----------|---------|
+| `/home/admin/projects/axidraw-service` | Source code (git repo) |
+| `/opt/docker/docker-compose.yml` | Service orchestration (from rpi-config) |
+| `/opt/data/axidraw` | Persistent data (jobs.db, uploads) |
+| `/opt/scripts/update-projects.sh` | Deployment script (from rpi-config) |
 
 ## Configuration
 
